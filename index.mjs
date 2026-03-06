@@ -529,18 +529,24 @@ export async function AnthropicAuthPlugin({ client }) {
                   return wrapStream(last429);
                 }
 
-                // Proactive switch on overage/threshold
+                // Proactive switch: only if there's a strictly healthier account
+                // (not in overage, under threshold, and not in cooldown)
+                // Don't switch away from a working account to one that might be worse
                 if (
                   current.overage ||
                   Math.max(current.util5h, current.util7d) >
                     pool.config.threshold
                 ) {
-                  const prev = current;
-                  current = pickNext(pool, current);
-                  if (current !== prev) {
+                  const candidate = pickNext(pool, current);
+                  if (
+                    candidate !== current &&
+                    !candidate.overage &&
+                    Math.max(candidate.util5h, candidate.util7d) < pool.config.threshold
+                  ) {
                     poolLog(
-                      `threshold/overage, switching from "${prev.label}" to "${current.label}" (5h=${prev.util5h.toFixed(2)} 7d=${prev.util7d.toFixed(2)} overage=${prev.overage})`,
+                      `proactive switch from "${current.label}" to "${candidate.label}" (5h=${current.util5h.toFixed(2)} 7d=${current.util7d.toFixed(2)} overage=${current.overage})`,
                     );
+                    current = candidate;
                   }
                 }
 
