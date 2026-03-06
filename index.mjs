@@ -463,50 +463,65 @@ export async function AnthropicAuthPlugin({ client }) {
                     saveUtil(current);
                     return wrapStream(r2);
                   }
+                  // Refresh failed — try every other account before giving up
                   setCooldown(current.id, Date.now() + pool.config.cooldownMs);
                   current.cooloffUntil = Date.now() + pool.config.cooldownMs;
-                  const prev = current;
-                  current = pickNext(pool, current);
-                  poolLog(
-                    `401/403 refresh failed, switching from "${prev.label}" to "${current.label}"`,
-                  );
-                  if (current === prev) return wrapStream(response);
-                  const ok2 = await refreshToken(current);
-                  if (!ok2) return wrapStream(response);
-                  const retry = buildRequest(input, init, current.access);
-                  const r2 = await fetch(retry.requestInput, {
-                    ...(init ?? {}),
-                    body: retry.body,
-                    headers: retry.requestHeaders,
-                  });
-                  parseUtil(r2, current);
-                  saveUtil(current);
-                  return wrapStream(r2);
+                  const tried401 = new Set([current.id]);
+                  let last401 = response;
+                  while (tried401.size < pool.accounts.length) {
+                    const prev = current;
+                    current = pickNext(pool, current);
+                    if (current === prev || tried401.has(current.id)) break;
+                    tried401.add(current.id);
+                    poolLog(`401/403 trying "${current.label}" after "${prev.label}" failed`);
+                    const ok2 = await refreshToken(current);
+                    if (!ok2) continue;
+                    const retry = buildRequest(input, init, current.access);
+                    const r2 = await fetch(retry.requestInput, {
+                      ...(init ?? {}),
+                      body: retry.body,
+                      headers: retry.requestHeaders,
+                    });
+                    parseUtil(r2, current);
+                    saveUtil(current);
+                    if (r2.status !== 401 && r2.status !== 403) return wrapStream(r2);
+                    last401 = r2;
+                    setCooldown(current.id, Date.now() + pool.config.cooldownMs);
+                    current.cooloffUntil = Date.now() + pool.config.cooldownMs;
+                  }
+                  return wrapStream(last401);
                 }
 
-                // 429: cooloff + switch + retry
+                // 429: switch + retry, try all accounts before giving up
                 if (response.status === 429) {
                   setCooldown(current.id, Date.now() + pool.config.cooldownMs);
                   current.cooloffUntil = Date.now() + pool.config.cooldownMs;
-                  const prev = current;
-                  current = pickNext(pool, current);
-                  poolLog(
-                    `429 rate limited, switching from "${prev.label}" to "${current.label}"`,
-                  );
-                  if (current === prev) return wrapStream(response);
-                  if (!current.access || current.expires < Date.now()) {
-                    const ok = await refreshToken(current);
-                    if (!ok) return wrapStream(response);
+                  const tried = new Set([current.id]);
+                  let last429 = response;
+                  while (tried.size < pool.accounts.length) {
+                    const prev = current;
+                    current = pickNext(pool, current);
+                    if (current === prev || tried.has(current.id)) break;
+                    tried.add(current.id);
+                    poolLog(`429 trying "${current.label}" after "${prev.label}" rate limited`);
+                    if (!current.access || current.expires < Date.now()) {
+                      const ok = await refreshToken(current);
+                      if (!ok) continue;
+                    }
+                    const retry = buildRequest(input, init, current.access);
+                    const r2 = await fetch(retry.requestInput, {
+                      ...(init ?? {}),
+                      body: retry.body,
+                      headers: retry.requestHeaders,
+                    });
+                    parseUtil(r2, current);
+                    saveUtil(current);
+                    if (r2.status !== 429) return wrapStream(r2);
+                    last429 = r2;
+                    setCooldown(current.id, Date.now() + pool.config.cooldownMs);
+                    current.cooloffUntil = Date.now() + pool.config.cooldownMs;
                   }
-                  const retry = buildRequest(input, init, current.access);
-                  const r2 = await fetch(retry.requestInput, {
-                    ...(init ?? {}),
-                    body: retry.body,
-                    headers: retry.requestHeaders,
-                  });
-                  parseUtil(r2, current);
-                  saveUtil(current);
-                  return wrapStream(r2);
+                  return wrapStream(last429);
                 }
 
                 // Proactive switch on overage/threshold
