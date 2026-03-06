@@ -543,34 +543,37 @@ export async function AnthropicAuthPlugin({ client }) {
                   return wrapStream(last401);
                 }
 
-                // 429: brief retry on same account first (transient), then rotate
+                // 429: transient retry on same account first, then sustained rotation
                 if (response.status === 429) {
-                  // Retry same account after short delay — most 429s are transient
-                  const retryAfter = parseInt(
-                    response.headers.get("retry-after") || "0",
-                  );
-                  const delay = Math.min(
-                    retryAfter > 0 ? retryAfter * 1000 : 2000,
-                    10000,
-                  );
-                  await new Promise((r) => setTimeout(r, delay));
-                  const sameRetry = buildRequest(input, init, current.access);
-                  const sameResp = await fetch(sameRetry.requestInput, {
-                    ...(init ?? {}),
-                    body: sameRetry.body,
-                    headers: sameRetry.requestHeaders,
-                  });
-                  if (sameResp.status !== 429) {
-                    parseUtil(sameResp, current);
-                    saveUtil(current);
-                    return wrapStream(sameResp);
+                  const retryAfterMs =
+                    parseFloat(response.headers.get("retry-after") || "0") *
+                    1000;
+                  const transient =
+                    retryAfterMs > 0 && retryAfterMs <= TRANSIENT_THRESHOLD;
+                  let latestResp;
+                  if (transient) {
+                    await new Promise((r) => setTimeout(r, retryAfterMs));
+                    const sameRetry = buildRequest(input, init, current.access);
+                    const sameResp = await fetch(sameRetry.requestInput, {
+                      ...(init ?? {}),
+                      body: sameRetry.body,
+                      headers: sameRetry.requestHeaders,
+                    });
+                    if (sameResp.status !== 429) {
+                      parseUtil(sameResp, current);
+                      saveUtil(current);
+                      return wrapStream(sameResp);
+                    }
+                    latestResp = sameResp;
+                  } else {
+                    latestResp = response;
                   }
 
-                  // Still 429 — rotate through other accounts
-                  setCooldown(current.id, Date.now() + pool.config.cooldownMs);
-                  current.cooloffUntil = Date.now() + pool.config.cooldownMs;
+                  const until = parseCooldown(latestResp);
+                  setCooldown(current.id, until);
+                  current.cooloffUntil = until;
                   const tried = new Set([current.id]);
-                  let last429 = sameResp;
+                  let last429 = latestResp;
                   while (tried.size < pool.accounts.length) {
                     const prev = current;
                     current = pickNext(pool, current);
@@ -592,14 +595,33 @@ export async function AnthropicAuthPlugin({ client }) {
                     parseUtil(r2, current);
                     saveUtil(current);
                     if (r2.status !== 429) return wrapStream(r2);
+                    const u = parseCooldown(r2);
+                    setCooldown(current.id, u);
+                    current.cooloffUntil = u;
                     last429 = r2;
-                    setCooldown(
-                      current.id,
-                      Date.now() + pool.config.cooldownMs,
-                    );
-                    current.cooloffUntil = Date.now() + pool.config.cooldownMs;
                   }
-                  return wrapStream(last429);
+
+                  const now = Date.now();
+                  const times = pool.accounts
+                    .map((a) => a.cooloffUntil)
+                    .filter((t) => t > now);
+                  const earliest = times.length
+                    ? Math.min(...times)
+                    : now + FALLBACK_COOLDOWN;
+                  const secs = Math.max(
+                    1,
+                    Math.min(
+                      Math.ceil((earliest - now) / 1000),
+                      MAX_RETRY_AFTER,
+                    ),
+                  );
+                  const hdrs = new Headers(last429.headers);
+                  hdrs.set("retry-after", String(secs));
+                  return new Response(last429.body, {
+                    status: 429,
+                    statusText: last429.statusText,
+                    headers: hdrs,
+                  });
                 }
 
                 // Proactive switch: only if there's a strictly healthier account
