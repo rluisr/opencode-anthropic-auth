@@ -103,28 +103,20 @@ function pickNext(pool, current) {
   const now = Date.now();
   const threshold = pool.config.threshold;
   const currentUtil = Math.max(current.util5h, current.util7d);
-  // Only switch to strictly healthier accounts
-  const candidates = pool.accounts.filter(
-    (a) =>
-      a !== current &&
-      now >= a.cooloffUntil &&
-      Math.max(a.util5h, a.util7d) < threshold &&
-      !a.overage,
-  );
-  if (candidates.length) return candidates[0];
-  const better = pool.accounts.filter(
-    (a) =>
-      a !== current &&
-      now >= a.cooloffUntil &&
-      Math.max(a.util5h, a.util7d) < currentUtil,
-  );
+  const available = pool.accounts.filter((a) => a !== current && now >= a.cooloffUntil);
+  if (!available.length) return current;
+  // Prefer healthy accounts (under threshold, no overage)
+  const healthy = available.filter((a) => Math.max(a.util5h, a.util7d) < threshold && !a.overage);
+  if (healthy.length) return healthy[0];
+  // Prefer accounts with lower utilization than current
+  const better = available.filter((a) => Math.max(a.util5h, a.util7d) < currentUtil);
   if (better.length) {
-    better.sort(
-      (a, b) => Math.max(a.util5h, a.util7d) - Math.max(b.util5h, b.util7d),
-    );
+    better.sort((a, b) => Math.max(a.util5h, a.util7d) - Math.max(b.util5h, b.util7d));
     return better[0];
   }
-  return current;
+  // All accounts are equally bad — pick the one with lowest util anyway
+  available.sort((a, b) => Math.max(a.util5h, a.util7d) - Math.max(b.util5h, b.util7d));
+  return available[0];
 }
 
 // --- Token refresh (reads latest from DB, optimistic recovery on failure) ---
