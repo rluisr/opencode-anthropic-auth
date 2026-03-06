@@ -470,11 +470,8 @@ export async function AnthropicAuthPlugin({ client }) {
                   const ok = await refreshToken(current);
                   if (!ok) {
                     const prev = current;
-                    setCooldown(
-                      current.id,
-                      Date.now() + pool.config.cooldownMs,
-                    );
-                    current.cooloffUntil = Date.now() + pool.config.cooldownMs;
+                    setCooldown(current.id, Date.now() + FALLBACK_COOLDOWN);
+                    current.cooloffUntil = Date.now() + FALLBACK_COOLDOWN;
                     current = pickNext(pool, current);
                     poolLog(
                       `refresh failed, switching from "${prev.label}" to "${current.label}"`,
@@ -509,8 +506,9 @@ export async function AnthropicAuthPlugin({ client }) {
                     return wrapStream(r2);
                   }
                   // Refresh failed — try every other account before giving up
-                  setCooldown(current.id, Date.now() + pool.config.cooldownMs);
-                  current.cooloffUntil = Date.now() + pool.config.cooldownMs;
+                  const until = parseCooldown(response);
+                  setCooldown(current.id, until);
+                  current.cooloffUntil = until;
                   const tried401 = new Set([current.id]);
                   let last401 = response;
                   while (tried401.size < pool.accounts.length) {
@@ -534,11 +532,9 @@ export async function AnthropicAuthPlugin({ client }) {
                     if (r2.status !== 401 && r2.status !== 403)
                       return wrapStream(r2);
                     last401 = r2;
-                    setCooldown(
-                      current.id,
-                      Date.now() + pool.config.cooldownMs,
-                    );
-                    current.cooloffUntil = Date.now() + pool.config.cooldownMs;
+                    const until = parseCooldown(r2);
+                    setCooldown(current.id, until);
+                    current.cooloffUntil = until;
                   }
                   return wrapStream(last401);
                 }
